@@ -1,73 +1,16 @@
-#include <Arduino.h>
-
-// // Definições dos pinos
-// const int lm35Pin = A1;  // Pino do sensor de temperatura LM35
-// const int heaterPin = 9; // Pino do transistor controlando o aquecedor
-
-// // Variáveis para armazenar a temperatura e a temperatura de referência
-// float currentTemperature = 0.0;
-// float referenceTemperature = 255.0; // Temperatura inicial de referência
-
-// // Ganho proporcional
-// float Kp = 1.0;
-
-// void setup()
-// {
-//   Serial.begin(9600);         // Inicializa a comunicação serial
-//   pinMode(heaterPin, OUTPUT); // Define o pino do aquecedor como saída
-// }
-
-// void loop()
-// {
-//   // Leitura da temperatura do sensor LM35
-//   int sensorValue = analogRead(lm35Pin);
-//   currentTemperature = (sensorValue * (5.0 / 1023.0)) * 100; // Conversão para Celsius
-
-//   // Controle Proporcional
-//   float error = referenceTemperature - currentTemperature;
-//   float controlSignal = Kp * error;
-
-//   // Limitação do sinal de controle entre 0 e 255 (valores válidos para PWM)
-//   controlSignal = constrain(controlSignal, 0, 255);
-
-//   // Envia o sinal de controle para o aquecedor
-//   analogWrite(heaterPin, controlSignal);
-
-//   // Envia as informações para a interface serial
-//   Serial.print("Current Temperature: ");
-//   Serial.print(currentTemperature);
-//   Serial.print(" °C, Reference Temperature: ");
-//   Serial.print(referenceTemperature);
-//   Serial.print(" °C, Control Signal: ");
-//   Serial.println(controlSignal);
-
-//   // Verifica se há novos dados na interface serial
-//   if (Serial.available() > 0)
-//   {
-//     // Lê a nova temperatura de referência da interface serial
-//     referenceTemperature = Serial.parseFloat();
-//     Serial.print("New Reference Temperature Set: ");
-//     Serial.println(referenceTemperature);
-//   }
-
-//   delay(1000); // Atraso de 1 segundo entre leituras
-// }
-
-
 /*************************
 Teste de algoritmo de controle, ISR executando à 100Hz atrelado ao timer2
 + leitura da porta serial e interpretação de comandos
 = para comando de PWM associado com led no pino 5 ou 6 (980 Hz; timer0)
-Fernando Passold, em 18/04/2004
+Fernando Passold, em 18/04/2024
+Revisado em 21/05/2024.
 ​
 "Dicionário" de comandos interpretados pela porta serial:
 p 100.5 = define ganho Proporcional em 100.5
-i 50 = define ganho Integral em 50
-d 0.005 = define ganho derivativo em 0.005
 a = toggle entre modo manual e modo automático
 a0 - a 0 = "desliga" modo automático
 a 1 = "liga" modo automático
-v = toggle no modo verboouse (debug)
+v = toggle no modo verbouse (debug)
 v 0 = desliga modo verbouse
 v 1 = liga modo verbouse
 r 50 = define Referencia em 50
@@ -83,78 +26,65 @@ Detalhes da montagem:
 
 // declaração variáveis globais:
 bool ledState = 0;            // para fazer variar nível lógico led monitor
-const byte LED_MONITOR = 10;  // toglles a cada 0,5 segundos monitorando algo controle (ISR)
-const byte LED_PWM = 5;       // Led à ser "controlado", no pino 5 (ou 6)
-int ledCounter = 0;           // conta até 50 para então picar Led monitor
+const byte LED_MONITOR = 13;  // toglles a cada 0,5 segundos monitorando algo controle (ISR)
+const byte pwm = 9;           // Led à ser "controlado", no pino 5 (ou 6)
+const byte analogPin = A0;    // pino (A/D) que recebe sinal analógico
 
-// variável associada com "debug" --> "verbouse": retorna info via porta serial
-bool verbouse = true;
-/****
-Obs.: se verbouse desativado, o que deve ser visto na porta serial é algo como:
-sp: r[k],   pv: y[k],   mv: u[k]
-340.0000,   328.0000,   12.0000
-340.0000,   328.0000,   12.0000
-Isto preve interação com Matlab para captura de dados
-*****/
+int ledCounter = 0;           // conta até 50 para então picar Led monitor
+bool verbouse = true;         // gerar texto confirmando comando recebido pela porta serial
+bool mute = false;            // indica ativar ou não o buzzer (feedback auditivo)
+
+const int MAX_U = 255;        // caso do PWM do Arduino, [0, 255]
 
 // variáveis associadas com algoritmo de controle
-bool control = false;       // comuta entre modo automático (-1) e manual (=0)
-const byte analogPin = A0;  // pino (A/D) que recebe sinal analógico
-float sp = 0;               // set-point, referência, r[k]
-float pv = 0;               // process-variable, saída do processo, y[k]
-float mv = 0;               // manipulated-variable, saída do controlador, u[k]
-float u, u1, u2;            // u[k], u[k-1], u[k-2]
-float y, y1, y2;            // y[k], y[k-1], y[k-2]
-float e, e1, e2;            // e[k], e[k-1], e[k-2]
-float f, f1, f2;            // f[k], f[k-1], f[k-2]: sinal filtrado do erro
-float sum_i;                // soma da ação integral;
-float Kp, Ki, Kd;           // ganhos parte proporcional, integral, derivativa
-float alpha = 0.1;          // associado com filtro derivativo
-float T = 0.01;             // período de amostragem adotado (em segundos)
+bool control = false;         // comuta entre modo automático (>=1) e manual (<=0)
+float sp = 0;                 // set-point, referência, r[k]
+float pv = 0;                 // process-variable, saída do processo, y[k]
+int mv = 0;                   // manipulated-variable, saída do controlador, u[k]
+float u;                      // u[k]
+float Kp = 1.0;               // ganho proporcional
 
 // variáveis associadas com dados (string) capturada via porta serial
 String inputString;
 char option;
 float value;
+int numericIndex = 0;
+unsigned int lastTime, period;
 
 void Init_Control() {
   // inicializa variáveis associadas com lei de controle
-  u = 0; u1 = 0; u2 = 0;
-  y = 0; y1 = 0; y2 = 0;
-  e = 0; e1 = 0; e2 = 0;
-  f = 0; f1 = 0; f2 = 0;
+  u = 0;
   mv = 0;
-  sum_i = 0;
 }
 
-void publica_modo(void) {
-  if (!verbouse) Serial.println(" ");  // pula linha em branco
-  if (control) Serial.println("Modo automático ativado!");
-  if (!control) Serial.println("Modo manual ativado");
-  Serial.println(" ");
+void BeepErro(void) {
+  // 1 x beep algo longo, comando não reconhecido
+  // digitalWrite(BUZZER, HIGH);
+  // delay(200);
+  // digitalWrite(BUZZER, LOW);
 }
 
-void publica_MV(float duty) {
-  float percent;
-  Serial.print("MV: u[k] = ");
-  Serial.print(duty);                     // Imprime o valor com duas casas decimais
-  percent = ((int)duty) * 100.0 / 255.0;  // PWM só aceita [0..255]
-  Serial.print(" (");
-  Serial.print(percent, 2);
-  Serial.println("%)");
+void BeepOk(void) {
+  // 2 x beeps médios, intervalo curto, aviso de comando reconhecido
+  // digitalWrite(BUZZER, HIGH);
+  // delay(100);
+  // digitalWrite(BUZZER, LOW);
+  // delay(50);
+  // digitalWrite(BUZZER, HIGH);
+  // delay(100);
+  // digitalWrite(BUZZER, LOW);
 }
 
-void publica_sp(void) {
-  Serial.print("SP: r[k] = ");
-  Serial.println(sp, 4);
+void publica_estado(char const msg[], bool estado) {
+  Serial.print(msg);
+  Serial.print(": ");
+  if (estado)
+    Serial.println("ON (true)");
+  else
+    Serial.println("OFF (false)");
 }
 
 void publica_parametro(char const msg[], float valor) {
-  /****
-  Obs.: a declaração const antes de msg[] é para tornas esta declaração válida em C ou C++,
-  senão: warning: ISO C++ forbids converting a string constant to 'char*'
-  Ref.: https://stackoverflow.com/questions/20944784/why-is-conversion-from-string-literal-to-char-valid-in-c-but-invalid-in-c
-  ******/
   Serial.print(msg);
   Serial.print(" = ");
   Serial.println(valor, 4);
@@ -162,24 +92,23 @@ void publica_parametro(char const msg[], float valor) {
 
 void publica_status(void) {
   float aux;  // copia de algumas variáveis atualizadas muito rapidamente, à cada 100 Hz...
-  Serial.println("Status do sistema:");
-  aux = pv;
+  Serial.println("# Status do sistema ###################################");
   Serial.print("PV: y[k] = ");
+  aux = pv;
   Serial.print(aux, 2);
-  aux = mv;
   Serial.print(", MV: u[k] = ");
+  aux = (float)mv;
   Serial.print(aux, 2);
   Serial.print(", SP: r[k] = ");
-  Serial.println(sp, 2);
+  aux = sp;
+  Serial.println(aux, 2);
   Serial.print(" Modo = ");
   if (control)
     Serial.println("AUTO");
   else
     Serial.println("Manual");
   publica_parametro("   Kp", Kp);
-  publica_parametro("   Ki", Ki);
-  publica_parametro("   Kd", Kd);
-  publica_parametro("alpha", alpha);
+  publica_estado("Verbouse", verbouse);
 }
 
 void setup() {
@@ -188,16 +117,13 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(LED_MONITOR, OUTPUT);
   digitalWrite(LED_MONITOR, LOW);
-  pinMode(LED_PWM, OUTPUT);
-  digitalWrite(LED_PWM, LOW);
-  analogWrite(LED_PWM, 0);  // garante que este led inicia apagado
+  pinMode(pwm, OUTPUT);
+  analogWrite(pwm, 0);  // garante que este led inicia apagado
   // inicializa saída de controle, mv
   Init_Control();
-  Kp = 1.0;
-  Ki = 0;
-  Kd = 0;
   control = false;  // controle automático desligado
   verbouse = true;  // ativado debug
+  mute = false;
   // initialize timer2
   noInterrupts();  // disable all interrupts
   TCCR2A = 0;      // set entire TCCR2A register to 0
@@ -217,15 +143,16 @@ void setup() {
   publica_status();
   Serial.println("Modo \"verbouse\" ativado.");
   Serial.println("Aguardando comandos...");
+  BeepOk();
   Serial.println(" ");
 }
 
-void limita(int *valor) {
+void limita_valor(int *valor) {
   // Bloco "Saturador", trabalha com variáveis int
   // altera diretamente conteúdo da variável valor;
   // passagem de parâmetros, sem cópia, por referência
-  // uso: limita(&duty);
-  if (*valor > 255) *valor = 255;
+  // uso: limita_valour(&duty);
+  if (*valor > MAX_U) *valor = MAX_U;
   if (*valor < 0) *valor = 0;
 }
 
@@ -241,199 +168,132 @@ ISR(TIMER2_COMPA_vect) {  //timer2 interrupt @ 100 Hz
   }
   // inicia seção da lei de controle
   pv = analogRead(analogPin);  // y[k] = info do sensor (A/D de 12-bits: [0..4095])
-  y = pv;
-  // note que variável pv é atualizada sempre
-  // e que saída PWM é sempre re-programada
   if (control) {
     // processa lei de controle
-    e = sp - pv;  // e[k] = r[k] - y[k]
+    float e = sp - pv;  // e[k] = r[k] - y[k]
     // ação proporcional - sempre ativada!
     u = Kp * e;
-    if (Ki > 0) {
-      // ação integral
-      sum_i = sum_i + (T * (e + e1)) / 2;  // integração trapezoidal
-      // prever saturação ação integral?
-      //
-      u = u + Ki * sum_i;
-    }
-    if (Kd > 0) {
-      // ação derivativa:
-      // filtrando sinal de erro, filtro passa-baixas exponencial 1a-ordem
-      f = alpha * e + (1 - alpha) * f1;  // filtragem sinal do erro
-      u = u + Kd * ((f - f1) / T);       // derivada sinal filtrado do erro
-    }
-    // saída do sinal para processo
-    // passa por "bloco saturador": no caso PWM do Arduino: [0 255]
-    if (u < 0) u = 0;
-    if (u > 255) u = 255;
-    // Note que variável u preserva casas decimais..
-    mv = u;  // transforma u[k] para int
+    // saída do sinal para processo: valor atualizado
   }
-  analogWrite(LED_PWM, (int)mv);  // valores entre 0 ~ 255 (0 ~ 100%) de dutty-cycle
-  // atualiza variáveis associados com atrasos, deixa preparadas para próxima chamada
-  f2 = f1;
-  f1 = f;
-  e2 = e1;
-  e1 = e;
-  u2 = u1;
-  if (control)
-    u1 = u;
-  else
-    u1 = mv;  // necessáriuo para evitar um "bump" qdo sai de manual --> automático
-  y2 = y1;
-  y1 = y;
+  mv = (int)u;  // mv é a valor efetivamente jogado para "fora" da placa, via DAC ou PWM
+  limita_valor(&mv);
+  analogWrite(pwm, mv);  // valores entre 0 ~ 255 (0 ~ 100%) de dutty-cycle
 }
 
-void publica_verbouse(void) {
-  Serial.print("Modo verbouse: ");
-  if (verbouse)
-    Serial.println("ATIVADO");
-  else
-    Serial.println("desativado");
-}
-
-void init_auto(void) {
-  // sai do modo manual para automático, mas para evitar "lixo" em variáveis de amostras
-  // atrasadas, melhor zerar certas amostras atradas.
-  e = 0; e1 = 0; e2 = 0;
-  f = 0; f1 = 0; f2 = 0;
-  sum_i = 0;
+void reinit_auto(void) {
+  // atualiza variáveis quando sai do modo manual para automático
+  u = 0;
   control = true;
   verbouse = false;  // automaticamente desativa modo verbouse; passa a publicar dados do sistema
-  publica_verbouse();
   Serial.println(" ");
   Serial.println("Ativando Modo AUTOmático:");
   Serial.println("sp: r[k],\tpv: y[k],\tmv: u[k]");
   Serial.println(" ");
 }
 
-void process_instruction(char option, float value) {
-  // Realizar a ação com base na opção repassada
-  int duty;
-  switch ((int)option) {
-    case 'v':  // toggle no modo verbouse
-      if (!verbouse) {
-        Serial.println(" ");  // garante que pula uma linha em branco antes de cortar publicação de dados
-        Serial.println("Entrando em modo \"verbouse\".");
-        verbouse = true;
-      } else {
-        Serial.println(" ");
-        Serial.println("Modo \"verbouse\" sendo desativado.");
-        Serial.println(" ");
-        verbouse = false;
-      }
-      break;
-    case 'a':
-      if (value > 0) {
-        init_auto();    // control = true;
-      } else {
-        if (!control) {
-          init_auto(); // control = true;
-        } else {
-          control = false;
-          Serial.println(" ");  // pula linha em branco
-          Serial.println("Entrando em modo Manual");
-          verbouse = true; publica_verbouse();
-        }
-      }
-      break;
-    case 'u':                                        // ajustar diretamente u[k] ou MV
-      duty = (int)value;                             // transforma para int
-      limita(&duty);                                 // bloco "saturador"
-      mv = duty;                                     // atualiza valor para algo de controle
-      if (control) publica_MV(duty);                 // publica_parametro("duty", duty);
-      break;
-    case 'r':  // ajusta r[k] = set point, sp
-      sp = value;
-      if (verbouse) publica_sp();
-      break;
-    case 's':            // publica "status" (alguns valores atuais)
-      publica_status();  // independente do verbouse ativado ou não
-      break;
-    case 'p':  // ajustar ganho proporcional
-      Kp = value;
-      if (verbouse) publica_parametro("Kp", Kp);  // publica_Kp();
-      break;
-    case 'd':
-      Kd = value;
-      if (verbouse) publica_parametro("Kd", Kd);  // publica_Kd();
-      break;
-    case 'i':
-      Ki = value;
-      if (verbouse) publica_parametro("Ki", Ki);
-      break;
-    // Adicione mais casos conforme necessário
-    default:
-      if (verbouse) {
-        Serial.println(" <-- Comando não reconhecido");
-      }
-      break;
+void Update_bool_variable(bool *bool_var) {
+  if (numericIndex > 0) {
+    // significa que usuário informou algum "valor"
+    if (value <= 0)
+      *bool_var = false;  // valores nulos e negativos --> false
+    else
+      *bool_var = true;  // valores positivos --> true
+  } else {
+    *bool_var = !(*bool_var);  // simplesmente alterna valor (toggle)
   }
 }
 
-void process_token(String inputString) {
-  //***** Lida com string de entrada via serial
-  if (verbouse) {
-    Serial.print("> String recebida = [");
-    Serial.print(inputString);
-    Serial.print("], ");
-    // Remove espaços em branco da string
-    inputString.trim();
-    Serial.print("trim String = [");
-    Serial.print(inputString);
-    Serial.print("], ");
-  }
-  // Encontra o índice do primeiro caractere numérico
-  int numericIndex = 0;
-  for (int i = 0; i < inputString.length(); i++) {
-    if (isdigit(inputString[i]) || inputString[i] == '.') {
-      numericIndex = i;
+void process_instruction(char option, float value) {
+  bool previous_state;
+  switch ((int)option) {
+    case 'v':  // toggle no modo verbouse, ou "modo quieto"
+      Update_bool_variable(&verbouse);
+      publica_estado("verbouse", verbouse);
       break;
+    case 'm':  // toggle no modo de feedback auditivo
+      Update_bool_variable(&mute);
+      publica_estado("mute", mute);
+      break;
+    case 'a':  // comuta controle automático para manual
+      previous_state = control;
+      Update_bool_variable(&control);
+      if (control != previous_state) reinit_auto();
+      publica_estado("control", control);
+      break;
+    case 's':  // publica status do sistema
+      publica_status();
+      break;
+    case 'p':  // ajusta ganho proporcional Kp
+      Kp = value;
+      publica_parametro("Kp", Kp);
+      break;
+    case 'r':  // ajusta set-point
+      sp = value;
+      publica_parametro("sp", sp);
+      break;
+    case 'u':  // ajusta variável manipulada (em modo manual)
+      if (control) {
+        control = false;
+        publica_estado("control", control);
+      }
+      u = value;
+      publica_parametro("u", u);
+      break;
+    default:  // comando não reconhecido
+      Serial.print(option);
+      Serial.println(" : Comando não reconhecido.");
+      BeepErro();
+      break;
+  }
+  if (!mute) BeepOk();
+}
+
+void process_token() {
+  // necessário: option (char) e value (float)
+  String number;
+  option = inputString.charAt(0);
+  number = inputString.substring(1);
+  number.trim();
+  if (number.length() > 0) {
+    value = number.toFloat();
+    numericIndex = number.length();
+  } else {
+    value = 0;
+    numericIndex = 0;
+  }
+  if (verbouse) {
+    Serial.print("Recebido: ");
+    Serial.print(option);
+    if (numericIndex > 0) {
+      Serial.print(" ");
+      Serial.println(value);
+    } else {
+      Serial.println(" ");
     }
   }
-  if (verbouse) {
-    Serial.print("numericIndex=");
-    Serial.print(numericIndex);
-    Serial.print(", ");
-  }
-  // Extrai a parte inicial da string
-  String initialPart = inputString.substring(0, numericIndex);
-  // Separa o primeiro caractere da parte inicial (letra ou palavra)
-  // option = initialPart[0]; <-- algum bug em inputString.substring(0, numericIndex); se
-  // se numericIndex = 0
-  option = inputString[0];
-  // Converte a parte numérica da string para float
-  value = inputString.substring(numericIndex).toFloat();
-  if (verbouse) {
-    Serial.print("option = [");
-    Serial.print(option);
-    Serial.print("], ");
-    Serial.print("value = ");
-    Serial.println(value, 4);
-  }
+  process_instruction(option, value);
+  inputString = "";
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  float aux;
-  if (Serial.available() > 0) {  // Verifica se há dados disponíveis para leitura
-    // String inputString = Serial.readStringUntil('\n');
-    inputString = Serial.readStringUntil('\n');
-    process_token(inputString);
-    process_instruction(option, value);
-    inputString = "\0";
-  }  // fim tratamento buffer porta serial (se cheio)
-  if (!verbouse) {
-    // atualiza porta serial com dados do proceso:
-    // colunas: r[k] y[k] u[k]
-    // Notar que algumas detas variáveis são atualizadas mais rapidamente que a USART
-    aux = sp;
-    Serial.print(aux, 4);
-    Serial.print(", \t");
-    aux = pv;
-    Serial.print(aux, 4);
-    Serial.print(", \t");
-    aux = mv;
-    Serial.println(aux, 4);
+  // checa por dados na porta serial, quando disponíveis, lê a string e a trata
+  if (Serial.available()) {
+    inputString = Serial.readString();
+    inputString.trim();  // retira possíveis espaços
+    if (inputString != "") {
+      process_token();
+    }
+  }
+  if (!control) {
+    if ((millis() - lastTime) > period) {
+      // publica estado de variáveis...
+      Serial.print("sp: ");
+      Serial.print(sp, 2);
+      Serial.print(", pv: ");
+      Serial.print(pv, 2);
+      Serial.print(", u: ");
+      Serial.println(u, 2);
+      lastTime = millis();
+    }
   }
 }
