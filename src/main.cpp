@@ -130,8 +130,8 @@ void setup() {
   TCCR2A = 0;      // set entire TCCR2A register to 0
   TCCR2B = 0;      // same for TCCR2B
   TCNT2 = 0;       // initialize counter value to 0
-  // set compare match register for 100 Hz increments
-  OCR2A = 155;             // set counter up to 155
+  // set compare match register for 10 Hz increments
+  OCR2A = 1561;             // set counter up to 1561
   TCCR2A |= (1 << WGM21);  // turn on CTC mode
   // setting prescaler with 1024
   TCCR2B |= (1 << CS22) | (1 << CS21) | (1 << CS20);
@@ -147,6 +147,7 @@ void setup() {
   BeepOk();
   Serial.println(" ");
 }
+
 
 void limita_valor(int *valor) {
   // Bloco "Saturador", trabalha com variáveis int
