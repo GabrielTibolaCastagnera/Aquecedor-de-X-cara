@@ -1,10 +1,11 @@
+#include <arduino.h>
 /*************************
 Teste de algoritmo de controle, ISR executando à 100Hz atrelado ao timer2
 + leitura da porta serial e interpretação de comandos
 = para comando de PWM associado com led no pino 5 ou 6 (980 Hz; timer0)
 Fernando Passold, em 18/04/2024
 Revisado em 21/05/2024.
-​
+
 "Dicionário" de comandos interpretados pela porta serial:
 p 100.5 = define ganho Proporcional em 100.5
 a = toggle entre modo manual e modo automático
@@ -16,8 +17,8 @@ v 1 = liga modo verbouse
 r 50 = define Referencia em 50
 u 50 = define sinal de controle (se automático desligado) em 50
 u = faz PWM = 0 ("desliga")
-s = “status”: publica valores atuais de sp, Kp, Ki e Kd
-​
+s = “status”: publica valores atuais de sp, Kp e Kd
+
 Detalhes da montagem:
 - led para "testar" algoritmo de controle conectado no pino 5 ou 6
 - led que pisca indicando execução do algoritmo de controle, no pino 10
@@ -199,14 +200,14 @@ void Update_bool_variable(bool *bool_var) {
     else
       *bool_var = true;  // valores positivos --> true
   } else {
-    *bool_var = !(*bool_var);  // simplesmente alterna valor (toggle)
+    *bool_var = !(*bool_var);  // alterna modo da variável booleana
   }
 }
 
 void process_instruction(char option, float value) {
-  bool previous_state;
-  switch ((int)option) {
-    case 'v':  // toggle no modo verbouse, ou "modo quieto"
+  bool previous_state = false;
+  switch (option) {
+    case 'v':  // toggle modo verbouse, ou "modo quieto"
       Update_bool_variable(&verbouse);
       publica_estado("verbouse", verbouse);
       break;
