@@ -64,6 +64,7 @@ float sum_i;           // soma da ação integral;
 float Kp, Ki, Kd;      // ganhos parte proporcional, integral, derivativa
 float alpha = 0.1;     // associado com filtro derivativo
 float T = 0.01;        // período de amostragem adotado (em segundos)
+float auxtemp = 0;
 
 // variáveis associadas com dados (string) capturada via porta serial
 String inputString;
@@ -133,7 +134,7 @@ void publica_status(void) {
   Serial.println("# Status do sistema ###################################");
   Serial.print("PV: y[k] = ");
   aux = pv;
-  Serial.print(aux, 2);
+  Serial.print(aux * (5.0 / 1023.0) * 100, 2);
   Serial.print(", MV: u[k] = ");
   aux = (float)mv;
   Serial.print(aux, 2);
@@ -233,10 +234,12 @@ ISR(TIMER1_COMPA_vect) {  //timer1 interrupt @ 1 Hz
   ledState = !ledState;
   digitalWrite(LED_MONITOR, ledState);
   digitalWrite(LED_BUILTIN, ledState);  // faz piscar led da placa do Arduino
+  
   //   ledCounter = 0;
   // }
   // inicia seção da lei de controle
   pv = analogRead(analogPin);  // y[k] = info do sensor (A/D de 12-bits: [0..4095])
+  pv = pv * ((5.0 / 1023.0) * 100.0);
   y = (float)pv;
   // note que variável pv é atualizada sempre
   // e que saída PWM é sempre re-programada
@@ -272,6 +275,7 @@ ISR(TIMER1_COMPA_vect) {  //timer1 interrupt @ 1 Hz
     // u = u[kt] (float)
   }
   mv = (int)u;  // mv é a valor efetivamento jogado para "fora" da placa, via DAC ou PWM
+  
   limita_valor(&mv);
   analogWrite(LED_PWM, mv);  // valores entre 0 ~ 255 (0 ~ 100%) de dutty-cycle
   // atualiza variáveis associados com atrasos, deixa preparadas para próxima chamada
